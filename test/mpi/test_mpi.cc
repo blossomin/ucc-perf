@@ -13,6 +13,12 @@ END_C_DECLS
 #include <assert.h>
 #include <random>
 #include <pthread.h>
+#include <chrono>
+#include <numeric>
+#include <cmath>
+#include <iomanip>
+#include <unordered_map>
+#include <map>
 
 static ucc_status_t oob_allgather(void *sbuf, void *rbuf, size_t msglen,
                                   void *coll_info, void **req)
@@ -481,15 +487,22 @@ void set_gpu_device(test_set_gpu_device_t set_device)
 #endif
 
 std::vector<ucc_test_mpi_result_t> UccTestMpi::exec_tests(
-        std::vector<std::shared_ptr<TestCase>> tcs, bool triggered,
-                                                    bool persistent)
+    std::vector<std::shared_ptr<TestCase>> tcs, bool triggered,
+                            bool persistent,
+                            TestCaseParams params,
+                            int repeat_count,
+                            std::vector<double> *durations_out)
 {
-    int n_persistent = persistent ? UCC_TEST_N_PERSISTENT : 1;
+    int n_persistent = persistent ? repeat_count : 1;
     int world_rank, num_done, i;
     ucc_status_t status;
 
     MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
     std::vector<ucc_test_mpi_result_t> rst;
+
+    /* timing storage for this batch of testcases */
+    std::vector<double> durations_usec;
+    std::unordered_map<TestCase*, std::chrono::steady_clock::time_point> start_times;
 
     for (i = 0; i < n_persistent; i++) {
         for (auto tc: tcs) {
@@ -504,6 +517,8 @@ std::vector<ucc_test_mpi_result_t> UccTestMpi::exec_tests(
                 if (tc->args.flags & UCC_COLL_ARGS_FLAG_MEM_MAPPED_BUFFERS) {
                     MPI_Barrier(MPI_COMM_WORLD);
                 }
+                /* record start time just before post */
+                start_times[tc.get()] = std::chrono::steady_clock::now();
                 tc->run(triggered);
             } else {
                 if (verbose && 0 == world_rank) {
@@ -526,6 +541,14 @@ std::vector<ucc_test_mpi_result_t> UccTestMpi::exec_tests(
                     MPI_Abort(MPI_COMM_WORLD, -1);
                 }
                 if (status == UCC_OK) {
+                    /* collect timing for this testcase */
+                    auto it = start_times.find(tc.get());
+                    if (it != start_times.end()) {
+                        auto end = std::chrono::steady_clock::now();
+                        double usec = std::chrono::duration_cast<std::chrono::duration<double, std::micro>>(end - it->second).count();
+                        durations_usec.push_back(usec);
+                        start_times.erase(it);
+                    }
                     num_done++;
                 }
                 tc->tc_progress_ctx();
@@ -540,6 +563,11 @@ std::vector<ucc_test_mpi_result_t> UccTestMpi::exec_tests(
             rst.push_back(std::make_tuple(tc->args.coll_type, status));
        }
     }
+
+    /* append collected durations into provided output vector if given */
+    if (durations_out && !durations_usec.empty()) {
+        durations_out->insert(durations_out->end(), durations_usec.begin(), durations_usec.end());
+    }
     return rst;
 }
 
@@ -553,93 +581,109 @@ void UccTestMpi::run_all_at_team(ucc_test_team_t &team,
     params.persistent         = persistent;
     params.local_registration = local_registration;
 
-    for (auto i = 0; i < iterations; i++) {
-        for (auto &c : colls) {
-            std::vector<int> roots = {0};
-            std::vector<ucc_memory_type_t> test_memtypes = {UCC_MEMORY_TYPE_LAST};
-            std::vector<size_t> test_msgsizes = {0};
-            std::vector<ucc_datatype_t> test_dtypes = {(ucc_datatype_t)-1};
-            std::vector<ucc_reduction_op_t> test_ops = {(ucc_reduction_op_t)-1};
-            std::vector<ucc_test_vsize_flag_t> test_counts_vsize = {TEST_FLAG_VSIZE_64BIT};
-            std::vector<ucc_test_vsize_flag_t> test_displ_vsize = {TEST_FLAG_VSIZE_64BIT};
-            void **onesided_bufs;
+    /* aggregate durations per configuration across iterations */
+    std::map<std::string, std::vector<double>> durations_map;
+    std::map<std::string, TestCaseParams> params_map;
 
-            if (inplace && !ucc_coll_inplace_supported(c)) {
-                continue;
-            }
+    for (auto &c : colls) {
+        std::vector<int> roots = {0};
+        std::vector<ucc_memory_type_t> test_memtypes = {UCC_MEMORY_TYPE_LAST};
+        std::vector<size_t> test_msgsizes = {0};
+        std::vector<ucc_datatype_t> test_dtypes = {(ucc_datatype_t)-1};
+        std::vector<ucc_reduction_op_t> test_ops = {(ucc_reduction_op_t)-1};
+        std::vector<ucc_test_vsize_flag_t> test_counts_vsize = {TEST_FLAG_VSIZE_64BIT};
+        std::vector<ucc_test_vsize_flag_t> test_displ_vsize = {TEST_FLAG_VSIZE_64BIT};
+        void **onesided_bufs;
 
-            if (ucc_coll_is_rooted(c)) {
-                roots = gen_roots(team);
-            }
+        if (inplace && !ucc_coll_inplace_supported(c)) {
+            continue;
+        }
 
-            if (ucc_coll_has_memtype(c)) {
-                test_memtypes = mtypes;
-            }
+        if (ucc_coll_is_rooted(c)) {
+            roots = gen_roots(team);
+        }
 
-            if (ucc_coll_has_msgrange(c)) {
-                test_msgsizes = msgsizes;
-            }
+        if (ucc_coll_has_memtype(c)) {
+            test_memtypes = mtypes;
+        }
 
-            if (ucc_coll_has_datatype(c)) {
-                test_dtypes = dtypes;
-            }
+        if (ucc_coll_has_msgrange(c)) {
+            test_msgsizes = msgsizes;
+        }
 
-            if (ucc_coll_has_op(c)) {
-                test_ops = ops;
-            }
+        if (ucc_coll_has_datatype(c)) {
+            test_dtypes = dtypes;
+        }
 
-            if (ucc_coll_has_bits(c)) {
-                test_counts_vsize = counts_vsize;
-                test_displ_vsize = displs_vsize;
-            }
+        if (ucc_coll_has_op(c)) {
+            test_ops = ops;
+        }
 
-            for (auto r : roots) {
-                for (auto mt: test_memtypes) {
-                    if (triggered && !ucc_coll_triggered_supported(mt)) {
-                        rst.push_back(std::make_tuple(c, UCC_ERR_NOT_IMPLEMENTED));
+        if (ucc_coll_has_bits(c)) {
+            test_counts_vsize = counts_vsize;
+            test_displ_vsize = displs_vsize;
+        }
+
+        for (auto r : roots) {
+            for (auto mt: test_memtypes) {
+                if (triggered && !ucc_coll_triggered_supported(mt)) {
+                    rst.push_back(std::make_tuple(c, UCC_ERR_NOT_IMPLEMENTED));
+                    continue;
+                }
+
+                if ((c == UCC_COLL_TYPE_ALLTOALL ||
+                        c == UCC_COLL_TYPE_ALLTOALLV) &&
+                    team.ctx != ctx) {
+                    /* onesided alltoall */
+                    if (mt != UCC_MEMORY_TYPE_HOST) {
                         continue;
-                    }
-
-                    if ((c == UCC_COLL_TYPE_ALLTOALL ||
-                         c == UCC_COLL_TYPE_ALLTOALLV) &&
-                        team.ctx != ctx) {
-                        /* onesided alltoall */
-                        if (mt != UCC_MEMORY_TYPE_HOST) {
-                            continue;
-                        } else {
-                            onesided_bufs = onesided_buffers;
-                        }
                     } else {
-                        onesided_bufs = nullptr;
+                        onesided_bufs = onesided_buffers;
                     }
+                } else {
+                    onesided_bufs = nullptr;
+                }
 
-                    for (auto m: test_msgsizes) {
-                        for (auto dt: test_dtypes) {
-                            for (auto op: test_ops) {
-                                if (ucc_coll_args_is_reduction(c) &&
-                                    !ucc_coll_reduce_supported(op, dt)) {
-                                    continue;
-                                }
+                for (auto m: test_msgsizes) {
+                    for (auto dt: test_dtypes) {
+                        for (auto op: test_ops) {
+                            if (ucc_coll_args_is_reduction(c) &&
+                                !ucc_coll_reduce_supported(op, dt)) {
+                                continue;
+                            }
 
-                                if (mt != UCC_MEMORY_TYPE_HOST &&
-                                    (dt == UCC_DT_FLOAT128 ||
-                                     dt == UCC_DT_FLOAT128_COMPLEX)) {
-                                    continue;
-                                }
-                                for (auto count_bits: test_counts_vsize) {
-                                    for (auto displ_bits: test_displ_vsize) {
-                                        params.root       = r;
-                                        params.mt         = mt;
-                                        params.msgsize    = m;
-                                        params.dt         = dt;
-                                        params.op         = op;
-                                        params.count_bits = count_bits;
-                                        params.displ_bits = displ_bits;
-                                        params.buffers    = onesided_bufs;
+                            if (mt != UCC_MEMORY_TYPE_HOST &&
+                                (dt == UCC_DT_FLOAT128 ||
+                                    dt == UCC_DT_FLOAT128_COMPLEX)) {
+                                continue;
+                            }
+                            for (auto count_bits: test_counts_vsize) {
+                                for (auto displ_bits: test_displ_vsize) {
+                                    params.root       = r;
+                                    params.mt         = mt;
+                                    params.msgsize    = m;
+                                    params.dt         = dt;
+                                    params.op         = op;
+                                    params.count_bits = count_bits;
+                                    params.displ_bits = displ_bits;
+                                    params.buffers    = onesided_bufs;
 
+                                    /* build a key for this configuration */
+                                    std::string key = std::string(ucc_coll_type_str(c)) + ":" + std::to_string(params.msgsize) + ":" + std::to_string((int)params.dt) + ":" + std::to_string((int)params.op) + ":" + std::to_string((int)params.mt);
+                                    params_map.emplace(key, params);
+                                    auto &vec = durations_map[key];
+                                    /* run iterations. If persistent mode requested, create testcases once and post repeat times.
+                                       Otherwise create fresh testcases each iteration. */
+                                    if (params.persistent) {
                                         auto tcs = TestCase::init(team, c, nt, params);
-                                        auto res = exec_tests(tcs, triggered, persistent);
+                                        auto res = exec_tests(tcs, triggered, true, params, iterations, &vec);
                                         rst.insert(rst.end(), res.begin(), res.end());
+                                    } else {
+                                        for (int it = 0; it < iterations; ++it) {
+                                            auto tcs = TestCase::init(team, c, nt, params);
+                                            auto res = exec_tests(tcs, triggered, false, params, 1, &vec);
+                                            rst.insert(rst.end(), res.begin(), res.end());
+                                        }
                                     }
                                 }
                             }
@@ -647,6 +691,73 @@ void UccTestMpi::run_all_at_team(ucc_test_team_t &team,
                     }
                 }
             }
+        }
+    }
+
+    /* After iterations, print aggregated stats for each configuration (master only) */
+    int world_rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+    if (0 == world_rank) {
+        for (auto &entry : durations_map) {
+            const std::string &key = entry.first;
+            auto &vec = entry.second;
+            if (vec.empty()) {
+                continue;
+            }
+            auto &p = params_map[key];
+            std::sort(vec.begin(), vec.end());
+            double t_min = vec.front();
+            double t_max = vec.back();
+            double t_avg = std::accumulate(vec.begin(), vec.end(), 0.0) / vec.size();
+            auto pct = [&](double pr) {
+                size_t idx = (size_t)std::floor((pr/100.0) * (vec.size()-1));
+                return vec[idx];
+            };
+            double p50 = pct(50.0);
+            double p90 = pct(90.0);
+            double p95 = pct(95.0);
+            double p99 = pct(99.0);
+            double sq_sum = 0.0;
+            for (auto v: vec) sq_sum += (v - t_avg) * (v - t_avg);
+            double stddev = std::sqrt(sq_sum / vec.size());
+            double stddev_perc = (t_avg > 0.0) ? (stddev / t_avg * 100.0) : 0.0;
+
+            /* compute element count */
+            size_t elem_bytes = 1;
+            switch (p.dt) {
+            case UCC_DT_INT8: case UCC_DT_UINT8: elem_bytes = 1; break;
+            case UCC_DT_INT16: case UCC_DT_UINT16: case UCC_DT_BFLOAT16: case UCC_DT_FLOAT16: elem_bytes = 2; break;
+            case UCC_DT_INT32: case UCC_DT_UINT32: case UCC_DT_FLOAT32: elem_bytes = 4; break;
+            case UCC_DT_INT64: case UCC_DT_UINT64: case UCC_DT_FLOAT64: elem_bytes = 8; break;
+            case UCC_DT_FLOAT128: case UCC_DT_INT128: case UCC_DT_UINT128: elem_bytes = 16; break;
+            case UCC_DT_FLOAT32_COMPLEX: elem_bytes = 8; break;
+            case UCC_DT_FLOAT64_COMPLEX: elem_bytes = 16; break;
+            case UCC_DT_FLOAT128_COMPLEX: elem_bytes = 32; break;
+            default: elem_bytes = 1; break;
+            }
+            size_t bytes = p.msgsize;
+            size_t elem_count = (elem_bytes > 0) ? (bytes / elem_bytes) : 0;
+
+            std::string coll_name = key.substr(0, key.find(':'));
+            std::cout << "\n#------------------------------------------------------------\n";
+            std::cout << "# Benchmarking: " << coll_name << " \n";
+            int world_size = 0; MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+            std::cout << "# #processes: " << world_size << "\n";
+            std::cout << "#------------------------------------------------------------\n\n";
+            std::cout << std::setw(12) << "#bytes" << std::setw(15) << "#elem_count" << std::setw(15) << "#repetitions"
+                      << std::setw(15) << "t_min[usec]" << std::setw(15) << "t_max[usec]" << std::setw(15) << "t_avg[usec]"
+                      << std::setw(12) << "p50[usec]" << std::setw(12) << "p90[usec]" << std::setw(12) << "p95[usec]" << std::setw(12) << "p99[usec]" << std::setw(12) << "stddev[%]" << std::endl;
+
+            std::cout << std::setw(12) << bytes << std::setw(15) << elem_count << std::setw(15) << vec.size()
+                      << std::setw(15) << std::fixed << std::setprecision(2) << t_min
+                      << std::setw(15) << std::fixed << std::setprecision(2) << t_max
+                      << std::setw(15) << std::fixed << std::setprecision(2) << t_avg
+                      << std::setw(12) << std::fixed << std::setprecision(2) << p50
+                      << std::setw(12) << std::fixed << std::setprecision(2) << p90
+                      << std::setw(12) << std::fixed << std::setprecision(2) << p95
+                      << std::setw(12) << std::fixed << std::setprecision(2) << p99
+                      << std::setw(12) << std::fixed << std::setprecision(2) << stddev_perc
+                      << std::endl;
         }
     }
 }

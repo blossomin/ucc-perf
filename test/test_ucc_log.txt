@@ -1,0 +1,57 @@
+===== UCC MPI TEST INFO =======
+seed:         42
+collectives:  Allreduce
+data types:   float32
+memory types: Host
+teams:        world
+
+#------------------------------------------------------------
+# Benchmarking: Allreduce 
+# #processes: 6
+#------------------------------------------------------------
+
+      #bytes    #elem_count   #repetitions    t_min[usec]    t_max[usec]    t_avg[usec]   p50[usec]   p90[usec]   p95[usec]   p99[usec]   stddev[%]
+       16384           4096        1000000           8.97         815.25          11.04       10.61       11.98       13.60       17.54       22.53
+
+#------------------------------------------------------------
+# Benchmarking: Allreduce 
+# #processes: 6
+#------------------------------------------------------------
+
+      #bytes    #elem_count   #repetitions    t_min[usec]    t_max[usec]    t_avg[usec]   p50[usec]   p90[usec]   p95[usec]   p99[usec]   stddev[%]
+       32768           8192        1000000          19.91        3635.00          22.42       22.07       23.12       24.69       29.69       20.89
+
+#------------------------------------------------------------
+# Benchmarking: Allreduce 
+# #processes: 6
+#------------------------------------------------------------
+
+      #bytes    #elem_count   #repetitions    t_min[usec]    t_max[usec]    t_avg[usec]   p50[usec]   p90[usec]   p95[usec]   p99[usec]   stddev[%]
+        4096           1024        1000000           5.64       21375.60           7.80        7.53        8.72        9.33       11.53      276.61
+
+#------------------------------------------------------------
+# Benchmarking: Allreduce 
+# #processes: 6
+#------------------------------------------------------------
+
+      #bytes    #elem_count   #repetitions    t_min[usec]    t_max[usec]    t_avg[usec]   p50[usec]   p90[usec]   p95[usec]   p99[usec]   stddev[%]
+       65536          16384        1000000          34.76        2425.97          40.13       39.60       42.23       43.40       50.56       11.57
+
+#------------------------------------------------------------
+# Benchmarking: Allreduce 
+# #processes: 6
+#------------------------------------------------------------
+
+      #bytes    #elem_count   #repetitions    t_min[usec]    t_max[usec]    t_avg[usec]   p50[usec]   p90[usec]   p95[usec]   p99[usec]   stddev[%]
+        8192           2048        1000000           6.77         275.54           8.86        8.57        9.55       10.81       13.75       24.50
+
+===== UCC MPI TEST REPORT =====
+collective                 tests    passed    failed   skipped
+Allreduce                5000000   5000000         0         0
+ 
+===== UCC MPI TEST SUMMARY =====
+total tests:  5000000
+passed:       5000000
+skipped:      0
+failed:       0
+elapsed:      228s

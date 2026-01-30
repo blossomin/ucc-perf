@@ -339,9 +339,11 @@ class UccTestMpi {
     std::vector<int> gen_roots(ucc_test_team_t &team);
     std::vector<ucc_test_vsize_flag_t> counts_vsize;
     std::vector<ucc_test_vsize_flag_t> displs_vsize;
-    std::vector<ucc_test_mpi_result_t> exec_tests(
+        std::vector<ucc_test_mpi_result_t> exec_tests(
             std::vector<std::shared_ptr<TestCase>> tcs,
-            bool triggered, bool persistent);
+            bool triggered, bool persistent, TestCaseParams params,
+            int repeat_count = 1,
+            std::vector<double> *durations_out = nullptr);
 public:
     std::vector<ucc_test_team_t> teams;
     std::vector<ucc_test_team_t> onesided_teams;
